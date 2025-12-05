@@ -3,6 +3,7 @@ package com.adyen.workshop.controllers;
 import com.adyen.model.RequestOptions;
 import com.adyen.model.checkout.*;
 import com.adyen.workshop.configurations.ApplicationConfiguration;
+import com.adyen.service.checkout.ModificationsApi;
 import com.adyen.service.checkout.PaymentsApi;
 import com.adyen.service.checkout.RecurringApi;
 import com.adyen.service.exception.ApiException;
@@ -28,11 +29,13 @@ public class ApiController {
 
     private final ApplicationConfiguration applicationConfiguration;
     private final PaymentsApi paymentsApi;
+    private final ModificationsApi modificationsApi;
     private final RecurringApi recurringApi;
 
-    public ApiController(ApplicationConfiguration applicationConfiguration, PaymentsApi paymentsApi, RecurringApi recurringApi) {
+    public ApiController(ApplicationConfiguration applicationConfiguration, PaymentsApi paymentsApi, ModificationsApi modificationsApi, RecurringApi recurringApi) {
         this.applicationConfiguration = applicationConfiguration;
         this.paymentsApi = paymentsApi;
+        this.modificationsApi = modificationsApi;
         this.recurringApi = recurringApi;
     }
 
@@ -217,11 +220,213 @@ public class ApiController {
         return ResponseEntity.ok().body(response);
     }
 
+    // Preauthorisation step - create an authorisation that can be modified/captured later
+    @PostMapping("/api/preauthorisation")
+    public ResponseEntity<PaymentResponse> preauthorisation(@RequestHeader String host, @RequestBody PaymentRequest body, HttpServletRequest request) throws IOException, ApiException {
+        if (body.getPaymentMethod() == null) {
+            log.warn("Preauthorisation requested without paymentMethod details");
+            return ResponseEntity.badRequest().build();
+        }
+
+        var paymentRequest = new PaymentRequest();
+        paymentRequest.setMerchantAccount(applicationConfiguration.getAdyenMerchantAccount());
+        paymentRequest.setChannel(PaymentRequest.ChannelEnum.WEB);
+        paymentRequest.setPaymentMethod(body.getPaymentMethod());
+        paymentRequest.setAmount(body.getAmount() != null ? body.getAmount() : new Amount().currency("EUR").value(4999L));
+
+        var orderRef = (body.getReference() != null && !body.getReference().isBlank())
+                ? body.getReference()
+                : UUID.randomUUID().toString();
+        paymentRequest.setReference(orderRef);
+        paymentRequest.setReturnUrl(request.getScheme() + "://" + host + "/handleShopperRedirect?orderRef=" + orderRef);
+
+        paymentRequest.setOrigin(request.getScheme() + "://" + host);
+        paymentRequest.setBrowserInfo(body.getBrowserInfo());
+        paymentRequest.setShopperIP(request.getRemoteAddr());
+        paymentRequest.setShopperInteraction(PaymentRequest.ShopperInteractionEnum.ECOMMERCE);
+        // If a stored token is used, set recurring model + shopperReference as required by Adyen
+        paymentRequest.setRecurringProcessingModel(PaymentRequest.RecurringProcessingModelEnum.SUBSCRIPTION);
+        paymentRequest.setShopperReference(SHOPPER_REFERENCE);
+
+        var authenticationData = new AuthenticationData();
+        authenticationData.setAttemptAuthentication(AuthenticationData.AttemptAuthenticationEnum.ALWAYS);
+        authenticationData.setThreeDSRequestData(new ThreeDSRequestData().nativeThreeDS(ThreeDSRequestData.NativeThreeDSEnum.PREFERRED));
+        paymentRequest.setAuthenticationData(authenticationData);
+
+        var requestOptions = new RequestOptions();
+        requestOptions.setIdempotencyKey(UUID.randomUUID().toString());
+
+        log.info("Preauthorisation request {}", paymentRequest, requestOptions);
+        var response = paymentsApi.payments(paymentRequest);
+        log.info("Preauthorisation response {}", response);
+        return ResponseEntity.ok(response);
+    }
+
+    // Adjust authorised amount (preauthorisation adjust)
+    @PostMapping("/api/modify-amount")
+    public ResponseEntity<PaymentAmountUpdateResponse> modifyAmount(@RequestBody Map<String, Object> body) throws IOException, ApiException {
+        var pspReference = (String) body.get("pspReference");
+        var amountMap = safeMap(body.get("amount"));
+        if (pspReference == null || pspReference.isBlank() || amountMap == null) {
+            log.warn("Modify amount requested without required fields");
+            return ResponseEntity.badRequest().build();
+        }
+
+        var amount = amountFromMap(amountMap, 0L);
+        if (amount == null) {
+            return ResponseEntity.badRequest().build();
+        }
+
+        var paymentAmountUpdateRequest = new PaymentAmountUpdateRequest();
+        paymentAmountUpdateRequest.setMerchantAccount(applicationConfiguration.getAdyenMerchantAccount());
+        paymentAmountUpdateRequest.setReference(body.getOrDefault("reference", "adjust-" + UUID.randomUUID()).toString());
+        paymentAmountUpdateRequest.setAmount(amount);
+
+        var industryUsage = body.get("industryUsage");
+        if (industryUsage instanceof String industryUsageString && !industryUsageString.isBlank()) {
+            try {
+                paymentAmountUpdateRequest.setIndustryUsage(PaymentAmountUpdateRequest.IndustryUsageEnum.fromValue(industryUsageString));
+            } catch (IllegalArgumentException ex) {
+                log.warn("Invalid industryUsage provided: {}", industryUsageString);
+                return ResponseEntity.badRequest().build();
+            }
+        }
+
+        var requestOptions = new RequestOptions();
+        requestOptions.setIdempotencyKey(UUID.randomUUID().toString());
+
+        log.info("Modify amount request for {} {}", pspReference, paymentAmountUpdateRequest, requestOptions);
+        var response = modificationsApi.updateAuthorisedAmount(pspReference, paymentAmountUpdateRequest, requestOptions);
+        log.info("Modify amount response {}", response);
+        return ResponseEntity.ok(response);
+    }
+
+    // Capture the authorised payment
+    @PostMapping("/api/capture")
+    public ResponseEntity<PaymentCaptureResponse> capture(@RequestBody Map<String, Object> body) throws IOException, ApiException {
+        var pspReference = (String) body.get("pspReference");
+        var amountMap = safeMap(body.get("amount"));
+        if (pspReference == null || pspReference.isBlank() || amountMap == null) {
+            log.warn("Capture requested without required fields");
+            return ResponseEntity.badRequest().build();
+        }
+
+        var amount = amountFromMap(amountMap, null);
+        if (amount == null) {
+            return ResponseEntity.badRequest().build();
+        }
+
+        var captureRequest = new PaymentCaptureRequest();
+        captureRequest.setMerchantAccount(applicationConfiguration.getAdyenMerchantAccount());
+        captureRequest.setReference(body.getOrDefault("reference", "capture-" + UUID.randomUUID()).toString());
+        captureRequest.setAmount(amount);
+
+        var requestOptions = new RequestOptions();
+        requestOptions.setIdempotencyKey(UUID.randomUUID().toString());
+
+        log.info("Capture request for {} {}", pspReference, captureRequest, requestOptions);
+        var response = modificationsApi.captureAuthorisedPayment(pspReference, captureRequest, requestOptions);
+        log.info("Capture response {}", response);
+        return ResponseEntity.ok(response);
+    }
+
+    // Cancel the authorised payment
+    @PostMapping("/api/cancel")
+    public ResponseEntity<PaymentCancelResponse> cancel(@RequestBody Map<String, Object> body) throws IOException, ApiException {
+        var pspReference = (String) body.get("pspReference");
+        if (pspReference == null || pspReference.isBlank()) {
+            log.warn("Cancel requested without pspReference");
+            return ResponseEntity.badRequest().build();
+        }
+
+        var cancelRequest = new PaymentCancelRequest();
+        cancelRequest.setMerchantAccount(applicationConfiguration.getAdyenMerchantAccount());
+        cancelRequest.setReference(body.getOrDefault("reference", "cancel-" + UUID.randomUUID()).toString());
+
+        var requestOptions = new RequestOptions();
+        requestOptions.setIdempotencyKey(UUID.randomUUID().toString());
+
+        log.info("Cancel request for {} {}", pspReference, cancelRequest, requestOptions);
+        var response = modificationsApi.cancelAuthorisedPaymentByPspReference(pspReference, cancelRequest, requestOptions);
+        log.info("Cancel response {}", response);
+        return ResponseEntity.ok(response);
+    }
+
+    // Refund after capture
+    @PostMapping("/api/refund")
+    public ResponseEntity<PaymentRefundResponse> refund(@RequestBody Map<String, Object> body) throws IOException, ApiException {
+        var pspReference = (String) body.get("pspReference");
+        var amountMap = safeMap(body.get("amount"));
+        if (pspReference == null || pspReference.isBlank() || amountMap == null) {
+            log.warn("Refund requested without required fields");
+            return ResponseEntity.badRequest().build();
+        }
+
+        var amount = amountFromMap(amountMap, null);
+        if (amount == null) {
+            return ResponseEntity.badRequest().build();
+        }
+
+        var refundRequest = new PaymentRefundRequest();
+        refundRequest.setMerchantAccount(applicationConfiguration.getAdyenMerchantAccount());
+        refundRequest.setReference(body.getOrDefault("reference", "refund-" + UUID.randomUUID()).toString());
+        refundRequest.setAmount(amount);
+
+        var requestOptions = new RequestOptions();
+        requestOptions.setIdempotencyKey(UUID.randomUUID().toString());
+
+        log.info("Refund request for {} {}", pspReference, refundRequest, requestOptions);
+        var response = modificationsApi.refundCapturedPayment(pspReference, refundRequest, requestOptions);
+        log.info("Refund response {}", response);
+        return ResponseEntity.ok(response);
+    }
+
 
     // Step 14 - Handle Redirect 3DS2 during payment.
     @GetMapping("/handleShopperRedirect")
     public RedirectView redirect(@RequestParam(required = false) String payload, @RequestParam(required = false) String redirectResult) throws IOException, ApiException {
 
         return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> safeMap(Object value) {
+        if (value instanceof Map) {
+            return (Map<String, Object>) value;
+        }
+        return null;
+    }
+
+    private Amount amountFromMap(Map<String, Object> amountMap, Long fallbackValue) {
+        if (amountMap == null) {
+            return null;
+        }
+        var currency = amountMap.getOrDefault("currency", "EUR").toString();
+        var valueObj = amountMap.get("value");
+        Long value = null;
+        if (valueObj instanceof Number number) {
+            value = number.longValue();
+        } else if (valueObj instanceof String stringValue && !stringValue.isBlank()) {
+            try {
+                value = Long.parseLong(stringValue);
+            } catch (NumberFormatException e) {
+                log.warn("Unable to parse amount value {}", stringValue);
+                return null;
+            }
+        }
+
+        if (value == null) {
+            value = fallbackValue;
+        }
+
+        if (value == null) {
+            log.warn("Amount value missing for request");
+            return null;
+        }
+
+        var amount = new Amount();
+        amount.setCurrency(currency);
+        amount.setValue(value);
+        return amount;
     }
 }
