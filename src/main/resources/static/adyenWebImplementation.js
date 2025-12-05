@@ -128,6 +128,10 @@ async function startCheckout() {
 
 // Step 10 - Function to handle payment completion redirects
 function handleOnPaymentCompleted(response) {
+    if (response.pspReference) {
+        console.info(`Payment authorised with pspReference=${response.pspReference}. Use this in curl calls for adjust/capture/refund.`);
+        window.lastPspReference = response.pspReference;
+    }
     switch (response.resultCode) {
         case "Authorised":
             window.location.href = "/result/success";
@@ -154,5 +158,20 @@ function handleOnPaymentFailed(response) {
             break;
     }
 }
+
+// Utility to quickly see incoming webhooks while testing the preauthorisation flow.
+async function fetchRecentWebhooks() {
+    try {
+        const events = await fetch("/api/webhooks/recent").then(response => response.json());
+        console.table(events);
+        return events;
+    } catch (error) {
+        console.error("Unable to fetch recent webhooks", error);
+        return [];
+    }
+}
+
+// Expose helper for manual testing in the browser console
+window.fetchRecentWebhooks = fetchRecentWebhooks;
 
 startCheckout();

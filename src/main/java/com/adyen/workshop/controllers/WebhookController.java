@@ -12,11 +12,14 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.io.IOException;
 import java.security.SignatureException;
+import java.util.Deque;
+import java.util.List;
+import java.util.concurrent.ConcurrentLinkedDeque;
 
 /**
  * REST controller for receiving Adyen webhook notifications
@@ -24,6 +27,7 @@ import java.security.SignatureException;
 @RestController
 public class WebhookController {
     private final Logger log = LoggerFactory.getLogger(WebhookController.class);
+    private final Deque<WebhookEventSummary> recentWebhookEvents = new ConcurrentLinkedDeque<>();
 
     private final ApplicationConfiguration applicationConfiguration;
 
@@ -75,6 +79,7 @@ public class WebhookController {
                     // Log any classic notification with token info if present
                     log.info("Webhook eventCode={}, success={}, merchantRef={}, pspRef={}, token={}, storedPaymentMethodId={}",
                             eventCode, success, merchantReference, pspReference, recurringDetailReference, storedPaymentMethodId);
+                    rememberWebhook(item);
                 }
 
                 return ResponseEntity.ok("[accepted]");
@@ -92,14 +97,14 @@ public class WebhookController {
             var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
             var node = mapper.readTree(json);
             var type = node.path("type").asText();
-            if ("recurring.token.created".equalsIgnoreCase(type)) {
+            if (type != null && type.toLowerCase().startsWith("recurring.token.")) {
                 var dataNode = node.path("data");
                 var merchantAccount = dataNode.path("merchantAccount").asText();
                 var shopperReference = dataNode.path("shopperReference").asText();
                 var storedPaymentMethodId = dataNode.path("storedPaymentMethodId").asText();
                 var tokenType = dataNode.path("type").asText();
-                log.info("Recurring token created event received. merchantAccount={}, shopperReference={}, storedPaymentMethodId={}, type={}",
-                        merchantAccount, shopperReference, storedPaymentMethodId, tokenType);
+                log.info("Recurring token event received. eventType={}, merchantAccount={}, shopperReference={}, storedPaymentMethodId={}, type={}",
+                        type, merchantAccount, shopperReference, storedPaymentMethodId, tokenType);
                 return ResponseEntity.ok("[accepted]");
             }
         } catch (Exception e) {
@@ -110,4 +115,39 @@ public class WebhookController {
         log.warn("Webhook payload is missing notification items");
         return ResponseEntity.unprocessableEntity().build();
     }
+
+    @GetMapping("/api/webhooks/recent")
+    public ResponseEntity<List<WebhookEventSummary>> recentWebhooks() {
+        return ResponseEntity.ok(List.copyOf(recentWebhookEvents));
+    }
+
+    private void rememberWebhook(NotificationRequestItem item) {
+        var amount = item.getAmount();
+        var summary = new WebhookEventSummary(
+                item.getEventCode(),
+                item.isSuccess(),
+                item.getMerchantReference(),
+                item.getPspReference(),
+                item.getOriginalReference(),
+                item.getReason(),
+                amount != null ? amount.getValue() : null,
+                amount != null ? amount.getCurrency() : null
+        );
+
+        recentWebhookEvents.addFirst(summary);
+        while (recentWebhookEvents.size() > 25) {
+            recentWebhookEvents.removeLast();
+        }
+    }
+
+    private record WebhookEventSummary(
+            String eventCode,
+            Boolean success,
+            String merchantReference,
+            String pspReference,
+            String originalReference,
+            String reason,
+            Long amountValue,
+            String amountCurrency
+    ) {}
 }
