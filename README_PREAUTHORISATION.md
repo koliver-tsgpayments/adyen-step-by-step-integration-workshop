@@ -93,7 +93,7 @@ curl -X POST http://localhost:8080/api/preauthorisation \
 curl -X POST http://localhost:8080/api/modify-amount \
   -H "Content-Type: application/json" \
   -d '{
-    "pspReference": "BCZSTQWQ97C64Q75",
+    "pspReference": "SLMTNJF2QBBLDR65",
     "reference": "adjust-demo-001",
     "amount": { "currency": "EUR", "value": 5499 },
     "industryUsage": "delayedCharge"
@@ -105,7 +105,7 @@ curl -X POST http://localhost:8080/api/modify-amount \
 curl -X POST http://localhost:8080/api/capture \
   -H "Content-Type: application/json" \
   -d '{
-    "pspReference": "WTLDSB4WXSKQZ375",
+    "pspReference": "P664QP4WXSKQZ375",
     "reference": "capture-demo-001",
     "amount": { "currency": "EUR", "value": 5499 }
   }'
@@ -116,7 +116,7 @@ curl -X POST http://localhost:8080/api/capture \
 curl -X POST http://localhost:8080/api/refund \
   -H "Content-Type: application/json" \
   -d '{
-    "pspReference": "HTCLCQ6R8RLV3575",
+    "pspReference": "KZX29M7JQR6WQT65",
     "reference": "refund-demo-001",
     "amount": { "currency": "EUR", "value": 3000 }
   }'
@@ -127,7 +127,7 @@ curl -X POST http://localhost:8080/api/refund \
 curl -X POST http://localhost:8080/api/cancel \
   -H "Content-Type: application/json" \
   -d '{
-    "pspReference": "HTCLCQ6R8RLV3575",
+    "pspReference": "CLZ34HL2QS98N775",
     "reference": "cancel-demo-001"
   }'
 ```
